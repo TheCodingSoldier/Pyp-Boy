@@ -1,7 +1,7 @@
 [package]
 name = "pyp-tui"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 crossterm = { version = "0.19", features = [ "serde" ] }
@@ -16,6 +16,7 @@ spatialtime = { version = "0.2", features = ["osm"] }
 reverse_geocoder = "4.1.1"
 ratatui = "0.29.0"
 gpsd_client = "0.1.5"
+uuid = { version = "1.0", features = ["v4"] }
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
