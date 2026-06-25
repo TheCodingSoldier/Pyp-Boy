@@ -1,10 +1,10 @@
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MenuItem {
-	Stat,
+    Stat,
     Inv,
     Data,
-	Map,
-	Radio,
+    Map,
+    Radio,
 }
 
 impl From<MenuItem> for usize {
@@ -12,14 +12,14 @@ impl From<MenuItem> for usize {
         match input {
             MenuItem::Stat => 0,
             MenuItem::Inv => 1,
-			MenuItem::Data => 2,
+            MenuItem::Data => 2,
             MenuItem::Map => 3,
-			MenuItem::Radio => 4,
+            MenuItem::Radio => 4,
         }
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StatSubMenu {
     General,
     Status,
@@ -36,15 +36,15 @@ impl From<StatSubMenu> for usize {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum InvSubMenu {
     Weapons,
     Apparel,
     Aid,
-	Misc,
-	Junk,
-	Mods,
-	Ammo,
+    Misc,
+    Junk,
+    Mods,
+    Ammo,
 }
 
 impl InvSubMenu {
@@ -67,15 +67,15 @@ impl From<InvSubMenu> for usize {
             InvSubMenu::Weapons => 0,
             InvSubMenu::Apparel => 1,
             InvSubMenu::Aid => 2,
-			InvSubMenu::Misc => 3,
+            InvSubMenu::Misc => 3,
             InvSubMenu::Junk => 4,
             InvSubMenu::Mods => 5,
-			InvSubMenu::Ammo => 6,
+            InvSubMenu::Ammo => 6,
         }
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DataSubMenu {
     Quests,
     Workshops,
