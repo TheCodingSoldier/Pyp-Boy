@@ -44,15 +44,39 @@ pub fn show_virtual_keyboard(
         vec!['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'],
         vec!['K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T'],
         vec!['U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3'],
-        vec!['4', '5', '6', '7', '8', '9', ' ', '←', '<', ' '], 
+        vec!['4', '5', '6', '7', '8', '9', ' ', '←', '✓', ' '],
     ];
 
-    let mut cursor_pos = (0, 0);
+    let mut cursor_pos = (0usize, 0usize);
 
     loop {
         terminal.clear();
         terminal.draw(|f| {
-            let area = centered_rect(70, 50, f.area());
+            let outer_area = f.size();
+
+            // Input preview box above keyboard
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(20),
+                    Constraint::Length(3),
+                    Constraint::Percentage(50),
+                    Constraint::Length(3),
+                ].as_ref())
+                .split(outer_area);
+
+            let preview = Paragraph::new(format!(" {} ", input))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(" {} ", kb_title))
+                        .style(Style::default().fg(Color::Green))
+                )
+                .style(Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD));
+            f.render_widget(Clear, layout[1]);
+            f.render_widget(preview, layout[1]);
+
+            let area = centered_rect(80, 60, outer_area);
             f.render_widget(Clear, area);
 
             let rows: Vec<Row> = keyboard_layout
@@ -63,21 +87,25 @@ pub fn show_virtual_keyboard(
                         row.iter()
                             .enumerate()
                             .map(|(x, &ch)| {
-                                let content = if ch == '←' {
-                                    "Bksp".to_string()
-                                } else {
-                                    ch.to_string()
+                                let content = match ch {
+                                    '←' => "[<]".to_string(),
+                                    '✓' => "[OK]".to_string(),
+                                    _ => ch.to_string(),
                                 };
 
                                 if (y, x) == cursor_pos {
                                     Cell::from(Span::styled(
-                                        format!("[{}]", content),
+                                        format!(">{}<", content),
                                         Style::default()
-                                            .fg(Color::Yellow)
+                                            .fg(Color::Black)
+                                            .bg(Color::Green)
                                             .add_modifier(Modifier::BOLD),
                                     ))
                                 } else {
-                                    Cell::from(Span::raw(format!(" {} ", content)))
+                                    Cell::from(Span::styled(
+                                        format!(" {} ", content),
+                                        Style::default().fg(Color::White),
+                                    ))
                                 }
                             })
                             .collect::<Vec<_>>(),
@@ -89,35 +117,33 @@ pub fn show_virtual_keyboard(
             let widths: Vec<Constraint> = vec![Constraint::Length(6); max_cols];
 
             let table = Table::new(rows, widths)
-                .block(Block::default().title("Keyboard").borders(Borders::ALL));
+                .block(
+                    Block::default()
+                        .title(" KEYBOARD - W/A/S/D: move | Enter: select | ESC: cancel ")
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::Green))
+                );
 
             f.render_widget(table, area);
 
-            let input_area = Rect {
-                x: area.x,
-                y: area.y.saturating_sub(3),
-                width: area.width,
-                height: 3,
-            };
-
-            let preview = Paragraph::new(format!("Input: {}", input))
-                .block(Block::default().borders(Borders::ALL).title(kb_title));
-            f.render_widget(preview, input_area);
+            // Footer hint
+            let hint = Paragraph::new(" W/S: row up/down    A/D: col left/right    Enter: type    [<]: backspace    [OK]: done ")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            f.render_widget(hint, layout[3]);
         })?;
 
         if let Event::Key(key) = event::read().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))? {
             match key.code {
-                KeyCode::Char('A') | KeyCode::Char('a') => {
-                    if cursor_pos.1 > 0 {
-                        cursor_pos.1 -= 1;
-                    }
+                KeyCode::Char('A') | KeyCode::Char('a') | KeyCode::Left => {
+                    if cursor_pos.1 > 0 { cursor_pos.1 -= 1; }
                 }
-                KeyCode::Char('D') | KeyCode::Char('d') => {
+                KeyCode::Char('D') | KeyCode::Char('d') | KeyCode::Right => {
                     if cursor_pos.1 < keyboard_layout[cursor_pos.0].len() - 1 {
                         cursor_pos.1 += 1;
                     }
                 }
-                KeyCode::Char('W') | KeyCode::Char('w') => {
+                KeyCode::Char('W') | KeyCode::Char('w') | KeyCode::Up => {
                     if cursor_pos.0 > 0 {
                         cursor_pos.0 -= 1;
                         if cursor_pos.1 >= keyboard_layout[cursor_pos.0].len() {
@@ -125,7 +151,7 @@ pub fn show_virtual_keyboard(
                         }
                     }
                 }
-                KeyCode::Char('S') | KeyCode::Char('s') => {
+                KeyCode::Char('S') | KeyCode::Char('s') | KeyCode::Down => {
                     if cursor_pos.0 < keyboard_layout.len() - 1 {
                         cursor_pos.0 += 1;
                         if cursor_pos.1 >= keyboard_layout[cursor_pos.0].len() {
@@ -136,20 +162,16 @@ pub fn show_virtual_keyboard(
                 KeyCode::Enter => {
                     let ch = keyboard_layout[cursor_pos.0][cursor_pos.1];
                     match ch {
-                        '←' => {
-                            input.pop();
-                        }
-                        '<' => return Ok(input),
-                        ' ' if cursor_pos == (3, 8) => {
-                            return Ok(input);
-                        }
+                        '←' => { input.pop(); }
+                        '✓' => return Ok(input),
+                        ' ' if cursor_pos == (3, 6) => input.push(' '),
+                        ' ' => {}
                         _ => input.push(ch),
                     }
                 }
-                KeyCode::Char(c) => {
-                    if c.is_ascii_alphanumeric() || c == ' ' {
-                        input.push(c);
-                    }
+                KeyCode::Backspace => { input.pop(); }
+                KeyCode::Esc => {
+                    return Err(Box::new(io::Error::new(io::ErrorKind::Interrupted, "Keyboard cancelled")));
                 }
                 _ => {}
             }

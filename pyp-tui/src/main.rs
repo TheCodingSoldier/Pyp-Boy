@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Line, Text},
-    widgets::{Block, BorderType, Borders, ListState, Paragraph, Tabs},
+    widgets::{Block, BorderType, Borders, Clear, ListState, Paragraph, Tabs},
     Terminal,
     Frame,
 };
@@ -37,7 +37,13 @@ mod render_tabs;
 mod menus;
 mod kb;
 
-use render_tabs::{render_map, render_stat, render_data, render_inv, read_db, get_map_data, Item, add_item_to_db, show_quantity_selector,};
+use render_tabs::{
+    render_map, render_stat, render_data, render_inv, read_db, get_map_data, Item,
+    add_item_to_db, show_quantity_selector,
+    render_stat_general, render_stat_status, render_stat_settings,
+    render_data_quests, render_data_workshops, render_data_stats,
+    render_radio,
+};
 use menus::{MenuItem, StatSubMenu, InvSubMenu, DataSubMenu};
 
 #[derive(Error, Debug)]
@@ -52,11 +58,13 @@ enum Event<I> {
     Input(I),
     Tick,
 }
+
 #[derive(Debug, PartialEq)]
 pub struct Coordinates {
     pub latitude: f64,
     pub longitude: f64,
 }
+
 pub fn get_current_coordinates_array() -> Result<[f64; 2], Box<dyn StdError>> {
     let mut gps = GPS::connect()
     	.map_err(|e| Box::<dyn StdError>::from(format!("GPS connect error: {:?}", e)))?;
@@ -67,30 +75,66 @@ pub fn get_current_coordinates_array() -> Result<[f64; 2], Box<dyn StdError>> {
 	} else {
 		Err(Box::new(io::Error::new(
 			io::ErrorKind::NotFound,
-			"Latitude or longitude invalid in GPS data",
+			"Latitude or longitude invalid",
 		)))
 	}
 }
+
+fn show_boot_screen<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> io::Result<()> {
+    terminal.clear()?;
+    terminal.draw(|f| {
+        let area = f.size();
+        let block = Block::default()
+            .title(" ROBCO INDUSTRIES (TM) UNIFIED OPERATING SYSTEM ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .style(Style::default().fg(Color::Green));
+
+        let text = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "COPYRIGHT 2075 ROBCO INDUSTRIES",
+                Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from(Span::raw("Initializing Pip-Boy 3000 Mk IV...") ),
+            Line::from(""),
+            Line::from(Span::raw("  [ OK ]  GPS daemon.......... gpsd://localhost:2947")),
+            Line::from(Span::raw("  [ OK ]  Pulse oximeter..... /dev/i2c-1 (MAX30102)")),
+            Line::from(Span::raw("  [ OK ]  Radio module....... RTL-SDR V4")),
+            Line::from(Span::raw("  [ OK ]  Inventory DB....... ./data/db.json")),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "  ALL SYSTEMS NOMINAL. WELCOME, VAULT DWELLER.",
+                Style::default().fg(Color::LightGreen),
+            )]),
+        ])
+        .alignment(Alignment::Left)
+        .block(block);
+
+        f.render_widget(Clear, area);
+        f.render_widget(text, area);
+    })?;
+    std::thread::sleep(Duration::from_secs(2));
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	
+
 	let coords: [f64; 2] = match get_current_coordinates_array() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Error getting coordinates: {}", e);
+            eprintln!("GPS error: {}", e);
             [0.0, 0.0]
         }
     };
 
 	let mut map_data: Option<String> = None;
-	let mut start_time = Instant::now();
-    let one_minute = Duration::from_secs(60);
+	let mut last_map_refresh = Instant::now();
+    let map_refresh_interval = Duration::from_secs(60);
+	let uptime_start = Instant::now();
 
-	if map_data.is_none() || start_time.elapsed() >= one_minute {
-		start_time = Instant::now();
-        map_data = Some(get_map_data(coords));
-		println!("getting map data: {:?}", map_data)
-    }
-
+    // State
 	let stat_submenu_titles = vec!["GENERAL", "STATUS", "SETTINGS"];
 	let inv_submenu_titles = vec!["WEAPONS", "APPAREL", "AID", "MISC", "JUNK", "MODS", "AMMO"];
 	let data_submenu_titles = vec!["QUESTS", "WORKSHOPS", "STATS"];
@@ -98,13 +142,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let mut active_stat_submenu = StatSubMenu::General;
 	let mut active_inv_submenu = InvSubMenu::Weapons;
 	let mut active_data_submenu = DataSubMenu::Quests;
-
+	let mut radio_freq_mhz: f64 = 100.1;
+	let mut error_message: Option<String> = None;
 
     enable_raw_mode().expect("can run in raw mode");
 	let mut stdout = io::stdout();
-
 	execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-	
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    // Boot screen
+    show_boot_screen(&mut terminal)?;
 
     let (tx, rx) = mpsc::channel();
     let tick_rate = Duration::from_millis(200);
@@ -114,13 +164,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let timeout = tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or_else(|| Duration::from_secs(0));
-
             if event::poll(timeout).expect("poll works") {
                 if let CEvent::Key(key) = event::read().expect("can read events") {
                     tx.send(Event::Input(key)).expect("can send events");
                 }
             }
-
             if last_tick.elapsed() >= tick_rate {
                 if let Ok(_) = tx.send(Event::Tick) {
                     last_tick = Instant::now();
@@ -129,57 +177,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let stdout = io::stdout();
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-
     let menu_titles = vec!["STAT", "INV", "DATA", "MAP", "RADIO"];
     let mut active_menu_item = MenuItem::Stat;
-    let mut inv_list_state = &mut ListState::default();
+    let mut inv_list_state = ListState::default();
     inv_list_state.select(Some(0));
 
-	/* let dev = hal::I2cdev::new("/dev/i2c-1").unwrap();
-
-	let mut sensor = Max3010x::new_max30102(dev);
-	let mut sensor = sensor.into_heart_rate().unwrap();
-	sensor.set_sample_averaging(SampleAveraging::Sa4).unwrap();
-	sensor.set_pulse_amplitude(Led::All, 15).unwrap();
-	sensor.enable_fifo_rollover().unwrap();
-
-	let mut data = [0; 3];
-	let samples_read = sensor.read_fifo(&mut data).unwrap();
-
-  	let dev = sensor.destroy(); */
-
     loop {
-		terminal.clear();
+        // Refresh map every 60s
+        if map_data.is_none() || last_map_refresh.elapsed() >= map_refresh_interval {
+            last_map_refresh = Instant::now();
+            let fresh_coords = get_current_coordinates_array().unwrap_or([0.0, 0.0]);
+            map_data = Some(get_map_data(fresh_coords));
+        }
+
         terminal.draw(|rect| {
             let size = rect.area();
-			
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(2)
-                .constraints(
-                    [
-                        Constraint::Length(3),
-                        Constraint::Min(2),
-                        Constraint::Length(3),
-                    ]
-                    .as_ref(),
-                )
-                .split(size);
-			
-            let copyright = Paragraph::new("COPYRIGHT 2075 ROBCO(R)")
-                .style(Style::default().fg(Color::LightCyan))
-                .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .style(Style::default().fg(Color::White))
-                        .title("COPYRIGHT")
-                        .border_type(BorderType::Plain),
-                );
 
             let menu: Vec<Line> = menu_titles
                 .iter()
@@ -196,52 +208,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ])
                 })
                 .collect();
-			
+
             let tabs = Tabs::new(menu)
                 .select(Some(active_menu_item.into()))
-                .block(Block::default().title("STAT").borders(Borders::ALL))
+                .block(Block::default().title(" PYP-BOY 3000 ").borders(Borders::ALL).style(Style::default().fg(Color::Green)))
                 .style(Style::default().fg(Color::White))
-                .highlight_style(Style::default().fg(Color::Yellow))
-                .divider(Span::raw("|"));
+                .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                .divider(Span::raw(" | "));
 
-			let (submenu_spans, active_index) = match active_menu_item {
+			let (submenu_spans, active_index): (Vec<Line>, usize) = match active_menu_item {
 				MenuItem::Stat => (
-					stat_submenu_titles
-						.iter()
-						.map(|t| {
+					stat_submenu_titles.iter().map(|t| {
 							let (first, rest) = t.split_at(1);
 							Line::from(vec![
 								Span::styled(first, Style::default().fg(Color::Green).add_modifier(Modifier::UNDERLINED)),
 								Span::styled(rest, Style::default().fg(Color::White)),
 							])
-						})
-						.collect::<Vec<Line>>(),
+						}).collect(),
 					active_stat_submenu.into(),
 				),
 				MenuItem::Inv => (
-					inv_submenu_titles
-						.iter()
-						.map(|t| {
+					inv_submenu_titles.iter().map(|t| {
 							let (first, rest) = t.split_at(1);
 							Line::from(vec![
 								Span::styled(first, Style::default().fg(Color::Green).add_modifier(Modifier::UNDERLINED)),
 								Span::styled(rest, Style::default().fg(Color::White)),
 							])
-						})
-						.collect::<Vec<Line>>(),
+						}).collect(),
 					active_inv_submenu.into(),
 				),
 				MenuItem::Data => (
-					data_submenu_titles
-						.iter()
-						.map(|t| {
+					data_submenu_titles.iter().map(|t| {
 							let (first, rest) = t.split_at(1);
 							Line::from(vec![
 								Span::styled(first, Style::default().fg(Color::Green).add_modifier(Modifier::UNDERLINED)),
 								Span::styled(rest, Style::default().fg(Color::White)),
 							])
-						})
-						.collect::<Vec<Line>>(),
+						}).collect(),
 					active_data_submenu.into(),
 				),
 				_ => (vec![], 0),
@@ -249,27 +252,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 			let show_secondary_menu = !submenu_spans.is_empty();
 
+            // Bottom bar: error or copyright
+            let bottom_bar = match &error_message {
+                Some(msg) => Paragraph::new(Span::styled(
+                        msg.clone(),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ))
+                    .alignment(Alignment::Center)
+                    .block(Block::default().borders(Borders::ALL).title(" SYSTEM WARNING ").style(Style::default().fg(Color::Red))),
+                None => Paragraph::new("COPYRIGHT 2075 ROBCO INDUSTRIES (TM)")
+                    .style(Style::default().fg(Color::Green))
+                    .alignment(Alignment::Center)
+                    .block(Block::default().borders(Borders::ALL).style(Style::default().fg(Color::Green)).title(" COPYRIGHT ")
+                        .border_type(BorderType::Plain)),
+            };
 
 			if show_secondary_menu {
 				let secondary_tabs = Tabs::new(submenu_spans)
 					.select(active_index)
-					.block(Block::default().title("SUBMENU").borders(Borders::ALL))
+					.block(Block::default().title(" SUBMENU ").borders(Borders::ALL).style(Style::default().fg(Color::Green)))
 					.style(Style::default().fg(Color::White))
-					.highlight_style(Style::default().fg(Color::Green))
-					.divider(Span::raw("|"));
+					.highlight_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+					.divider(Span::raw(" | "));
 
 				let adjusted_chunks = Layout::default()
 					.direction(Direction::Vertical)
-					.margin(2)
-					.constraints(
-						[
-							Constraint::Length(3),
-							Constraint::Length(3),
-							Constraint::Min(1),
-							Constraint::Length(3),
-						]
-						.as_ref(),
-					)
+					.margin(1)
+					.constraints([
+						Constraint::Length(3),
+						Constraint::Length(3),
+						Constraint::Min(1),
+						Constraint::Length(3),
+					].as_ref())
 					.split(size);
 
 				rect.render_widget(tabs, adjusted_chunks[0]);
@@ -277,9 +291,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 				match active_menu_item {
 					MenuItem::Stat => match active_stat_submenu {
-						StatSubMenu::General => rect.render_widget(render_stat_general(), adjusted_chunks[2]),
-						StatSubMenu::Status => rect.render_widget(render_stat_status(), adjusted_chunks[2]),
-						StatSubMenu::Settings => rect.render_widget(render_stat_settings(), adjusted_chunks[2]),
+						StatSubMenu::General => rect.render_widget(
+                                render_stat_general(coords, map_data.clone(), uptime_start),
+                                adjusted_chunks[2]
+                            ),
+						StatSubMenu::Status => rect.render_widget(
+                                render_stat_status(None, uptime_start),
+                                adjusted_chunks[2]
+                            ),
+						StatSubMenu::Settings => rect.render_widget(
+                                render_stat_settings(),
+                                adjusted_chunks[2]
+                            ),
 					},
 					MenuItem::Inv => match active_inv_submenu {
 						InvSubMenu::Weapons => draw_filtered_inventory(rect, adjusted_chunks[2], &mut inv_list_state, "Weapons"),
@@ -298,16 +321,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 					_ => {}
 				}
 
-
-				rect.render_widget(copyright, adjusted_chunks[3]);
+				rect.render_widget(bottom_bar, adjusted_chunks[3]);
 			} else {
+				let chunks = Layout::default()
+					.direction(Direction::Vertical)
+					.margin(1)
+					.constraints([
+						Constraint::Length(3),
+						Constraint::Min(2),
+						Constraint::Length(3),
+					].as_ref())
+					.split(size);
+
 				rect.render_widget(tabs, chunks[0]);
 				match active_menu_item {
 					MenuItem::Map => rect.render_widget(render_map(map_data.clone()), chunks[1]),
-					MenuItem::Radio => rect.render_widget(render_stat(), chunks[1]),
+					MenuItem::Radio => rect.render_widget(render_radio(radio_freq_mhz), chunks[1]),
 					_ => {}
 				}
-				rect.render_widget(copyright, chunks[2]);
+				rect.render_widget(bottom_bar, chunks[2]);
 			}
         })?;
 
@@ -337,7 +369,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 						MenuItem::Radio => MenuItem::Stat,
 					};
 				}
-
                 KeyCode::Down => {
                     if let Some(selected) = inv_list_state.selected() {
                         let amount_items = read_db().expect("can fetch item list").len();
@@ -380,6 +411,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 					}
 				}
 
+                // Radio frequency tuning
+                KeyCode::Char('u') | KeyCode::Char('U') => {
+                    if active_menu_item == MenuItem::Radio {
+                        radio_freq_mhz = (radio_freq_mhz + 0.1 * 10.0).round() / 10.0;
+                        if radio_freq_mhz > 108.0 { radio_freq_mhz = 87.5; }
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    if active_menu_item == MenuItem::Radio {
+                        radio_freq_mhz = (radio_freq_mhz - 0.1 * 10.0).round() / 10.0;
+                        if radio_freq_mhz < 87.5 { radio_freq_mhz = 108.0; }
+                    }
+                }
 
 				KeyCode::Char('+') => {
 					match active_menu_item {
@@ -407,6 +451,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 								DataSubMenu::Workshops => DataSubMenu::Quests,
 								DataSubMenu::Stats => DataSubMenu::Workshops,
 							};
+						}
+						MenuItem::Radio => {
+                            radio_freq_mhz = (radio_freq_mhz + 0.1 * 10.0).round() / 10.0;
+                            if radio_freq_mhz > 108.0 { radio_freq_mhz = 87.5; }
 						}
 						_ => {}
 					}
@@ -438,10 +486,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 								DataSubMenu::Stats => DataSubMenu::Quests,
 							};
 						}
+						MenuItem::Radio => {
+                            radio_freq_mhz = (radio_freq_mhz - 0.1 * 10.0).round() / 10.0;
+                            if radio_freq_mhz < 87.5 { radio_freq_mhz = 108.0; }
+						}
 						_ => {}
 					}
 				}
-
                 _ => {}
             },
             Event::Tick => {}
@@ -459,7 +510,7 @@ fn draw_filtered_inventory<'a>(
 ) {
     let inv_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
         .split(area);
 
     let (left, right) = render_inv(inv_list_state, category);
@@ -476,12 +527,10 @@ fn update_selected_item_quantity(
 
     if let Some(index) = parsed.iter().position(|item| item.id == id) {
         let item = &parsed[index];
-
         let name = item.name.clone();
         let details = item.details.clone();
         let category = item.category.clone();
         let created_at = item.created_at;
-
         parsed.remove(index);
 
         if new_quantity > 0 {
@@ -493,32 +542,9 @@ fn update_selected_item_quantity(
                 category,
                 created_at,
             };
-
             parsed.push(updated_item);
         }
-
         fs::write(DB_PATH, &serde_json::to_vec(&parsed)?)?;
     }
-
     Ok(())
-}
-
-fn render_stat_general<'a>() -> Paragraph<'a> {
-    Paragraph::new("General").block(Block::default().title("STAT"))
-}
-fn render_stat_status<'a>() -> Paragraph<'a> {
-    Paragraph::new("Status").block(Block::default().title("STAT"))
-}
-fn render_stat_settings<'a>() -> Paragraph<'a> {
-    Paragraph::new("Settings").block(Block::default().title("STAT"))
-}
-
-fn render_data_quests<'a>() -> Paragraph<'a> {
-    Paragraph::new("Quests").block(Block::default().title("DATA"))
-}
-fn render_data_workshops<'a>() -> Paragraph<'a> {
-    Paragraph::new("Workshops").block(Block::default().title("DATA"))
-}
-fn render_data_stats<'a>() -> Paragraph<'a> {
-    Paragraph::new("Stats").block(Block::default().title("DATA"))
 }
